@@ -18,6 +18,8 @@
 # limitations under the License.
 #
 
+include_recipe "paths"
+
 include_recipe "build-essential"
 
 case node['platform_family']
@@ -25,6 +27,8 @@ case node['platform_family']
     package "openssl-devel"
   when 'debian'
     package "libssl-dev"
+  when 'smartos'
+    package 'pkg-config'
 end
 
 nodejs_tar = "node-v#{node['nodejs']['version']}.tar.gz"
@@ -35,7 +39,14 @@ end
 # Let the user override the source url in the attributes
 nodejs_src_url = "#{node['nodejs']['src_url']}/#{nodejs_tar_path}"
 
-remote_file "/usr/local/src/#{nodejs_tar}" do
+case node['platform_family']
+  when 'smartos'
+    build_dir = Chef::Config[:file_cache_path]
+  else
+    build_dir = "/usr/local/src"
+end
+
+remote_file "#{build_dir}/#{nodejs_tar}" do
   source nodejs_src_url
   checksum node['nodejs']['checksum']
   mode 0644
@@ -45,24 +56,31 @@ end
 # --no-same-owner required overcome "Cannot change ownership" bug
 # on NFS-mounted filesystem
 execute "tar --no-same-owner -zxf #{nodejs_tar}" do
-  cwd "/usr/local/src"
-  creates "/usr/local/src/node-v#{node['nodejs']['version']}"
+  cwd build_dir
+  creates "#{build_dir}/node-v#{node['nodejs']['version']}"
 end
 
-bash "compile node.js (on #{node['nodejs']['make_threads']} cpu)" do
+make_jobs = [node['nodejs']['make_threads'], 2].max
+configure_options = node['nodejs']['configure_options'].join(' ')
+nodejs_helper = NodeJS::Helper.new(node)
+
+
+bash "compile node.js (on #{make_jobs} cpu)" do
   # OSX doesn't have the attribute so arbitrarily default 2
-  cwd "/usr/local/src/node-v#{node['nodejs']['version']}"
+  cwd "#{build_dir}/node-v#{node['nodejs']['version']}"
   code <<-EOH
     PATH="/usr/local/bin:$PATH"
-    ./configure --prefix=#{node['nodejs']['dir']} && \
-    make -j #{node['nodejs']['make_threads']}
+    ./configure --prefix=#{node['nodejs']['dir']} #{configure_options} && \
+    make -j #{make_jobs}
   EOH
-  creates "/usr/local/src/node-v#{node['nodejs']['version']}/node"
+  environment nodejs_helper.build_environment
+  creates "#{build_dir}/node-v#{node['nodejs']['version']}/node"
 end
 
 execute "nodejs make install" do
-  environment({"PATH" => "/usr/local/bin:/usr/bin:/bin:$PATH"})
+  environment({"PATH" => node['paths']['bin_path']})
   command "make install"
-  cwd "/usr/local/src/node-v#{node['nodejs']['version']}"
+  cwd "#{build_dir}/node-v#{node['nodejs']['version']}"
+  environment nodejs_helper.build_environment
   not_if {::File.exists?("#{node['nodejs']['dir']}/bin/node") && `#{node['nodejs']['dir']}/bin/node --version`.chomp == "v#{node['nodejs']['version']}" }
 end
